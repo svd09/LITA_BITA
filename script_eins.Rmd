@@ -1,0 +1,569 @@
+---
+title: "LITA vs BITA paper"
+output:
+  html_document:
+    df_print: paged
+---
+
+This notebook will contain code for cleaning and then analysis of this dataset.
+
+Going to use the whole dataset to redo the analysis for the LITA - BITA paper.
+
+Steps:
+
+1. Get the data
+2. Clean and get the patients that i want
+3. Use the earlier code to do both matched and unmatched analysis
+4. ROMA-like analysis.
+
+```{r}
+library(easypackages)
+libraries(c(
+  "tidyverse", "haven", "readxl",
+  "survival", "lubridate", "WeightIt",
+  "cobalt", "rms", "Hmisc", "survminer",
+  "cmprsk"
+))
+
+library(cobalt)
+library(Matching)
+library(MatchIt)
+library(WeightIt)
+library(twang)
+library(MatchThem)
+library(naniar)
+
+library(surv2sampleComp)
+
+```
+
+
+
+```{r}
+# get some useful functions...
+
+
+
+trim_var <- function(x){
+  
+  # stop if the vector is not numeric
+  
+  stopifnot(is.numeric(x))
+  
+  # now to obtain the 1st and 99th percentile.
+  
+  a <- quantile(x, 0.01)
+  b <- quantile(x, 0.99)
+  
+  # now to replace smallest values with a and 
+  # largest values with b
+  
+  y <- ifelse(x < a, a, 
+         ifelse(x > b, b, x))
+  
+  return(y)
+}
+```
+
+get the data:
+
+```{r}
+
+df <- read_csv("D:/lita_bita3/big2.csv")
+
+# now to see the data
+# keep only unique rows here.
+
+length(unique(df$Pat_ID))
+
+df2 <- df[!duplicated(df$Pat_ID), ]
+
+# df2 now contains the data / 3756 patients.
+
+# we want to do the whole analysis using all these
+# patients separated by sita and bita.
+
+# see how many bita
+
+names(df2) <- tolower(names(df2))
+
+df2 %>% count(bima)
+
+# 2911 sita and 845 bita.
+# that is going to be our main subgroup variable.
+
+# for the whole analysis, we will keep all 
+# patients.
+# we will limit patients only for the ROMA study.
+
+# confirm that no radials.
+
+df2 %>% count(radialis)
+
+summary(df2$pre_lvef)
+
+# graft details:
+
+# 0 - no grafts
+# 1 - vein
+# 3 - lima 
+# 4 - rima 
+
+```
+
+So, for the whole group analysis, will not do any limits. But should limit according to routine statistical guidelines for correct values.
+
+```{r}
+
+# limit some cont variables to meaningful ceilings.
+
+df2$creat <- with(df2, ifelse(creat > 5, 5, creat))
+
+df2$pre_lvef <- with(df2, ifelse(pre_lvef > 60, 60, pre_lvef))
+
+# los days
+
+describe(df2$los_days)
+
+# use the trim_var function.
+
+df2$postop_los <- trim_var(df2$los_days)
+
+df2 %>% count(gender) # convert to female
+
+df2$female <- df2$gender - 1
+
+df2 %>% count(female)
+
+```
+
+
+Now to continue to do the tables as before.
+
+```{r}
+# because we want to compare bita vs lita, we will remove those with single vessel disease and also those that have redo.
+# especially because we are going to do propensity matching.
+
+df2 %>% count(cad_disease)
+
+df3 <- df2 %>% filter(cad_disease %in% c(2,3)) # now kept only those with either dvd or tvd.
+
+# to remove also those that are redo.
+
+df3 %>% count(prior_cardiac_surgery)
+
+df3 <- df3 %>% filter(prior_cardiac_surgery == 0)
+
+
+# now df3 contains lita vs bita , dvd/tvd, no prior cardiac surgery.
+
+
+# define obese as bmi > 30
+
+df3$obese <- with(df3, ifelse(bmi > 30, 1, 0))
+
+df3 %>% count(obese)
+
+# df3 is the complete dataset prior to propensity matching.
+
+# write_csv(df3, 
+#          "D:/lita_bita3/complete_dataset.csv" )
+```
+
+
+
+Now to make the tables 1, 2, 3 and then do propensity matching.
+
+```{r}
+
+# get df3 here again, so that can do tables 1 & 2.
+
+df <- read_csv("D:/lita_bita3/complete_dataset.csv")
+
+# some small changes before tables...
+
+df$diabetes[df$diabetes == 8]<- 0
+
+df$left_main_disease[df$left_main_disease == 2]<- 0
+
+df <- df %>% filter(distals_n != 1)
+
+# now to do table 1.
+
+
+```
+
+
+
+
+```{r}
+
+# table 1.
+
+vars <- c(
+"age_at_surgery", "gender",  "height_cm", "weight_kg", 
+"bmi", "diabetes", "art_hypertension",  
+"smoker", "hyperlipemia", "copd", "pad", "creat", "pre_dialysis", 
+ "pre_lvef", "pre_lvef_function", "elective", "cad_disease", 
+"left_main_disease", "prior_pci", "pre_stroke", "bima")
+
+factors <- c(
+ "gender",   "diabetes", "art_hypertension",  
+"smoker", "hyperlipemia", "copd", "pad", "pre_dialysis", 
+  "pre_lvef_function", "elective", "cad_disease", 
+"left_main_disease", "prior_pci", "pre_stroke", "bima")
+
+t1 <- tableone::CreateTableOne(vars = vars,
+                               factorVars = factors,
+                               data = df,
+                               strata = c("bima"))
+
+
+t1 <- print(t1, nonnormal = c("age","creat","pre_lvef", "bmi"))
+
+
+# write.csv(t1,
+#           "D:/lita_bita3/tables/table1_wc.csv")
+```
+
+
+
+
+```{r}
+
+# now for the operative details...
+
+vars <- c("opcab", "conversion_to_onpump", "onpump_beating_heart", 
+"no_touch_aorta",  "length_of_surgery", "bypass_time", "cross_clamp_time",  "distals_n", "distals_svg_n", "svg_grafts", "seq_n", "proximals_n", "y_graft_n", "bima")
+
+factors <- c("opcab", "conversion_to_onpump", "onpump_beating_heart", 
+"no_touch_aorta", 
+ "distals_n", "distals_svg_n", "svg_grafts","seq_n", "proximals_n", "y_graft_n", "bima")
+
+
+t2 <- tableone::CreateTableOne(vars = vars,
+                               factorVars = factors,
+                               data = df,
+                               strata = c("bima"))
+
+
+t2 <- print(t2, nonnormal = c("length_of_surgery", "bypass_time", "cross_clamp_time"))
+
+# write.csv(t2, 
+#           "D:/lita_bita3/tables/table2_wc.csv")
+
+```
+
+
+Now to see the postoperative early outcomes for the whole group.
+
+```{r}
+
+vars <- c("post_low_cardiac_output", 
+"post_iabp", "post_ecmo", "post_mi", "post_reanimation", "post_cardiac_arrhythmia", 
+"post_redo_heart", "post_rethorax_bleeding", "post_stroke", "post_dswi", 
+"post_sepsis", "died_inhouse", "postop_los", "bima")
+
+factors <- c("post_low_cardiac_output", 
+"post_iabp", "post_ecmo", "post_mi", "post_reanimation", "post_cardiac_arrhythmia", 
+"post_redo_heart", "post_rethorax_bleeding", "post_stroke", "post_dswi", 
+"post_sepsis", "died_inhouse")
+
+t3 <- tableone::CreateTableOne(vars = vars,
+                               factorVars = factors,
+                               data = df,
+                               strata = c("bima"))
+
+
+t3 <- print(t3, nonnormal = c("postop_los"))
+
+# write.csv(t3, 
+#           "D:/lita_bita3/tables/table3_wc.csv")
+
+```
+
+
+Now to do the survival unadjusted and then do propensity score methods.
+
+
+```{r}
+
+df$surv_years <- (df$survival_days + 1)/365.24
+
+s <- survfit(Surv(surv_years, died) ~ bima, data = df)
+
+summary(s, times = c(0,5,10,15))
+
+survdiff(Surv(surv_years, died) ~ bima, data = df)
+
+```
+
+
+Plot for survival unadjusted and then save the plot.
+
+```{r}
+ 
+ a <- ggsurvplot(s,
+     surv.scale = "percent",
+     risk.table = T,
+     xlim = c(0, 15),
+     break.x.by = 5,
+     conf.int = T,
+     legend.labs = c("SITA", "BITA"),
+     palette = "lancet",
+     censor.size = 0)
+ 
+ 
+ ggsave(plot = print(a), 
+        filename = "D:/lita_bita3/figures/surv_wc.tiff",
+      height = 6,
+      width = 7,
+      units = "in",
+      dpi = 1200,
+      device = "tiff")
+
+
+```
+
+
+Get more unadjusted survival parameters using surv2sample ...
+
+```{r}
+
+res_wc <- surv2sampleComp::surv2sample(
+  time = df$surv_years,
+  status = df$died,
+  arm = df$bima,
+  tau = 15,
+  timepoints = c(5,10,15)
+)
+
+```
+
+
+```{r}
+
+# now to see the outcome of these parameters for each group and then
+# to see the differences between outcomes.
+
+res_wc$group0
+
+```
+
+Same results for the bima group.
+
+```{r}
+
+res_wc$group1
+
+```
+
+Now to see comparisons...
+
+```{r}
+
+res_wc$contrast.all
+
+```
+RMST for unadjusted data..
+
+```{r}
+
+res_wc$RMST
+
+```
+
+
+Now to do the propensity matching and then again see outcome for early
+and late mortality in the matched cohort.
+
+```{r}
+
+
+formula <- bima ~ age_at_surgery + female + diabetes + obese + art_hypertension + 
+  copd + pad + pre_stroke + pre_lvef + creat + left_main_disease + cad_disease + prior_pci + hyperlipemia + pre_dialysis
+
+match1 <- matchit(
+  data = df, formula = formula,
+  method = "nearest", caliper = 0.25,
+  replace = F, ratio = 5)
+
+match1
+
+summary(match1)
+
+bt <- bal.tab(match1, un = T)
+
+vn <- var.names(bt, type = "df", file = "D:/lita_bita3/varnames.csv")
+
+new_vn = read.csv("D:/lita_bita3/varnames2.csv")
+
+lp_whole <- 
+  
+  love.plot(bt, abs = T,un = T,
+          grid = T, thresholds = 0.1, colors = c("tomato4","gray"),
+          var.names = new_vn)
+
+# save this plot 
+
+
+ggsave(lp_whole, filename = "D:/lita_bita3/lp_whole.tiff",
+       height = 7, width = 5, units = "in", dpi = 900)
+
+
+
+# to get the dataset out and save it.
+
+df_wm <- match.data(match1)
+
+df_wm %>% count(bima)
+          
+# now to save this dataset.
+
+write_csv(df_wm,
+"D:/lita_bita3/matched_data.csv")
+
+
+```
+
+Now to do the tables for matched dataset.
+
+
+```{r}
+
+df_wm <- read_csv("D:/lita_bita3/matched_data.csv")
+
+
+# table 1.
+
+
+vars <- c(
+"age_at_surgery", "gender",  
+"bmi", "diabetes", "art_hypertension",  
+"smoker", "hyperlipemia", "copd", "pad", "creat", "pre_dialysis", 
+ "pre_lvef", "pre_lvef_function", "elective", "cad_disease", 
+"left_main_disease", "prior_pci", "pre_stroke", "bima")
+
+factors <- c(
+ "gender",   "diabetes", "art_hypertension",  
+"smoker", "hyperlipemia", "copd", "pad", "pre_dialysis", 
+  "pre_lvef_function", "elective", "cad_disease", 
+"left_main_disease", "prior_pci", "pre_stroke", "bima")
+
+t1 <- tableone::CreateTableOne(vars = vars,
+                               factorVars = factors,
+                               data = df_wm,
+                               strata = c("bima"))
+
+
+t1 <- print(t1, nonnormal = c("age","creat","pre_lvef", "bmi"))
+
+
+write.csv(t1,
+            "D:/lita_bita3/tables/table1_matched_wm.csv")
+
+```
+
+Now for operative details and then postoperative outcomes...
+
+```{r}
+
+vars <- c("opcab", "conversion_to_onpump", "onpump_beating_heart", 
+"no_touch_aorta",  "length_of_surgery", "bypass_time", "cross_clamp_time",  "distals_n", "distals_svg_n", "svg_grafts", "seq_n", "proximals_n", "y_graft_n", "bima")
+
+factors <- c("opcab", "conversion_to_onpump", "onpump_beating_heart", 
+"no_touch_aorta", 
+ "distals_n", "distals_svg_n", "svg_grafts","seq_n", "proximals_n", "y_graft_n", "bima")
+
+
+t2 <- tableone::CreateTableOne(vars = vars,
+                               factorVars = factors,
+                               data = df_wm,
+                               strata = c("bima"))
+
+
+t2 <- print(t2, nonnormal = c("length_of_surgery", "bypass_time", "cross_clamp_time"))
+
+write.csv(t2, 
+           "D:/lita_bita3/tables/table2_matched_wm.csv")
+
+```
+
+
+Postoperative outcomes ...
+
+```{r}
+
+
+vars <- c("post_low_cardiac_output", 
+"post_iabp", "post_ecmo", "post_mi", "post_reanimation", "post_cardiac_arrhythmia", 
+"post_redo_heart", "post_rethorax_bleeding", "post_stroke", "post_dswi", 
+"post_sepsis", "died_inhouse", "postop_los")
+
+factors <- c("post_low_cardiac_output", 
+"post_iabp", "post_ecmo", "post_mi", "post_reanimation", "post_cardiac_arrhythmia", 
+"post_redo_heart", "post_rethorax_bleeding", "post_stroke", "post_dswi", 
+"post_sepsis", "died_inhouse")
+
+t3 <- tableone::CreateTableOne(vars = vars,
+                               factorVars = factors,
+                               data = df_wm,
+                               strata = c("bima"))
+
+
+t3 <- print(t3, nonnormal = c("postop_los"))
+
+write.csv(t3, 
+           "D:/lita_bita3/tables/table3_matched_wm.csv")
+
+
+
+```
+
+
+Graph for the matched data.
+
+```{r}
+
+
+
+s_wm <- survfit(Surv(surv_years, died) ~ bima, data = df_wm)
+
+summary(s_wm, times = c(0,5,10,15))
+
+survdiff(Surv(surv_years, died) ~ bima, data = df_wm)
+
+
+```
+
+
+Now to see the graph for the adjusted data.
+
+```{r}
+
+
+ 
+ a_wm <- ggsurvplot(s_wm,
+     surv.scale = "percent",
+     risk.table = T,
+     xlim = c(0, 15),
+     break.x.by = 5,
+     conf.int = T,
+     legend.labs = c("SITA", "BITA"),
+     palette = "lancet",
+     censor.size = 0)
+ 
+ 
+ ggsave(plot = print(a_wm), 
+        filename = "D:/lita_bita3/figures/surv_matched_wm.tiff",
+      height = 6,
+      width = 7,
+      units = "in",
+      dpi = 1200,
+      device = "tiff")
+
+
+
+
+```
+
